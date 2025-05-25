@@ -9,7 +9,7 @@ type Client struct {
 	PhoneNumber   *string   `json:"phone_number,omitempty" db:"phone_number"`
 	Email         *string   `json:"email,omitempty" db:"email"`
 	DateOfBirth   *string   `json:"date_of_birth,omitempty" db:"date_of_birth"` // Store as string, parse to time.Time when needed
-	LoyaltyPoints int       `json:"loyalty_points" db:"loyalty_points"`
+	LoyaltyPoints *int      `json:"loyalty_points,omitempty" db:"loyalty_points"`
 	Notes         *string   `json:"notes,omitempty" db:"notes"`
 	CreatedAt     time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at" db:"updated_at"`

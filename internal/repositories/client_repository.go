@@ -43,19 +43,19 @@ func (r *clientRepository) CreateClient(executor SQLExecutor, client *models.Cli
 	if client.UpdatedAt.IsZero() {
 		client.UpdatedAt = currentTime
 	}
-	if client.LoyaltyPoints == nil { 
-		defaultPoints := 0
-		client.LoyaltyPoints = &defaultPoints
-	}
+	// LoyaltyPoints defaulting removed, will be handled by service or DB.
 
-	var dob sql.NullTime
-	if client.DateOfBirth != nil && !client.DateOfBirth.IsZero() {
-		dob = sql.NullTime{Time: *client.DateOfBirth, Valid: true}
+	var dobArg sql.NullTime
+	if client.DateOfBirth != nil && *client.DateOfBirth != "" {
+		parsedTime, err := time.Parse("2006-01-02", *client.DateOfBirth)
+		if err == nil { // Only set if parsing is successful
+			dobArg = sql.NullTime{Time: parsedTime, Valid: true}
+		}
+		// If parsing fails, dobArg remains invalid (NULL for DB), or an error could be returned.
 	}
-
 
 	err := executor.QueryRow(query,
-		client.FullName, client.PhoneNumber, client.Email, dob,
+		client.FullName, client.PhoneNumber, client.Email, dobArg, // Use dobArg
 		client.LoyaltyPoints, client.Notes, client.CreatedAt, client.UpdatedAt,
 	).Scan(&client.ID)
 
@@ -89,7 +89,10 @@ func (r *clientRepository) GetClientByID(id int64) (*models.Client, error) {
 		return nil, fmt.Errorf("%w: getting client by ID %d: %v", ErrDatabaseError, id, err)
 	}
 	if dob.Valid {
-		client.DateOfBirth = &dob.Time
+		dateStr := dob.Time.Format("2006-01-02")
+		client.DateOfBirth = &dateStr
+	} else {
+		client.DateOfBirth = nil
 	}
 	return client, nil
 }
@@ -112,7 +115,10 @@ func (r *clientRepository) GetClientByPhoneNumber(phoneNumber string) (*models.C
 		return nil, fmt.Errorf("%w: getting client by phone number %s: %v", ErrDatabaseError, phoneNumber, err)
 	}
 	if dob.Valid {
-		client.DateOfBirth = &dob.Time
+		dateStr := dob.Time.Format("2006-01-02")
+		client.DateOfBirth = &dateStr
+	} else {
+		client.DateOfBirth = nil
 	}
 	return client, nil
 }
@@ -170,7 +176,10 @@ func (r *clientRepository) GetClients(page, pageSize int, searchTerm *string) ([
 			return nil, 0, fmt.Errorf("%w: scanning client: %v", ErrDatabaseError, err)
 		}
 		if dob.Valid {
-			client.DateOfBirth = &dob.Time
+			dateStr := dob.Time.Format("2006-01-02")
+			client.DateOfBirth = &dateStr
+		} else {
+			client.DateOfBirth = nil
 		}
 		clients = append(clients, client)
 	}
@@ -194,13 +203,18 @@ func (r *clientRepository) UpdateClient(executor SQLExecutor, client *models.Cli
 	          WHERE id = $8`
 	
 	client.UpdatedAt = time.Now()
-	var dob sql.NullTime
-	if client.DateOfBirth != nil && !client.DateOfBirth.IsZero() {
-		dob = sql.NullTime{Time: *client.DateOfBirth, Valid: true}
+	var dobArg sql.NullTime
+	if client.DateOfBirth != nil && *client.DateOfBirth != "" {
+		parsedTime, err := time.Parse("2006-01-02", *client.DateOfBirth)
+		if err == nil {
+			dobArg = sql.NullTime{Time: parsedTime, Valid: true}
+		}
+		// Optional: return error if parsing fails
+		// else { return fmt.Errorf("invalid date_of_birth format: %s", *client.DateOfBirth) }
 	}
 
 	result, err := executor.Exec(query,
-		client.FullName, client.PhoneNumber, client.Email, dob,
+		client.FullName, client.PhoneNumber, client.Email, dobArg, // Use dobArg
 		client.LoyaltyPoints, client.Notes, client.UpdatedAt, client.ID,
 	)
 	if err != nil {
