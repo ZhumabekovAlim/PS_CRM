@@ -21,7 +21,8 @@ type PricelistItem struct {
 	SKU               *string   `json:"sku,omitempty" db:"sku"`
 	IsAvailable       bool      `json:"is_available" db:"is_available"`
 	ItemType          string    `json:"item_type" db:"item_type" binding:"required"` // e.g., BAR, HOOKAH, SNACK, SERVICE
-	CurrentStock      *int      `json:"current_stock,omitempty" db:"current_stock"`
+	TracksStock       bool      `json:"tracks_stock" db:"tracks_stock"`             // Whether this item's stock is tracked
+	CurrentStock      *int      `json:"current_stock,omitempty" db:"current_stock"` // Nullable for items that don't track stock or if stock is not yet set
 	LowStockThreshold *int      `json:"low_stock_threshold,omitempty" db:"low_stock_threshold"`
 	CreatedAt         time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at" db:"updated_at"`

@@ -1,455 +1,322 @@
 package handlers
 
 import (
-	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
-	"time"
+	// "time" // Not directly used by handlers, service handles time parsing
 
-	"ps_club_backend/internal/database"
-	"ps_club_backend/internal/models"
+	"ps_club_backend/internal/services"
+	"ps_club_backend/pkg/utils"
 
 	"github.com/gin-gonic/gin"
 )
 
-// Staff Member Handlers
-
-// CreateStaffMember handles the creation of a new staff member
-// This might involve creating a user entry first or linking to an existing one.
-func CreateStaffMember(c *gin.Context) {
-	var staff models.StaffMember
-	if err := c.ShouldBindJSON(&staff); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
-		return
-	}
-
-	// Business logic: If staff.UserID is not provided, and a user needs to be created (e.g., with a default role)
-	// or if staff.User is provided with details for a new user, handle that here.
-	// For simplicity, we assume staff.UserID might be null or point to an existing user.
-
-	db := database.GetDB()
-	query := `INSERT INTO staff_members (user_id, phone_number, address, hire_date, position, salary, created_at, updated_at)
-	          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at, updated_at`
-
-	staff.CreatedAt = time.Now()
-	staff.UpdatedAt = time.Now()
-
-	err := db.QueryRow(query,
-		staff.UserID, staff.PhoneNumber, staff.Address, staff.HireDate,
-		staff.Position, staff.Salary, staff.CreatedAt, staff.UpdatedAt,
-	).Scan(&staff.ID, &staff.CreatedAt, &staff.UpdatedAt)
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create staff member: " + err.Error()})
-		return
-	}
-	c.JSON(http.StatusCreated, staff)
+// StaffHandler holds the staff service.
+type StaffHandler struct {
+	staffService services.StaffService
 }
 
-// GetStaffMembers handles fetching all staff members, potentially with their user details
-func GetStaffMembers(c *gin.Context) {
-	db := database.GetDB()
-	// Query to join staff_members with users table to get full_name, email etc.
-	queryStr := `
-		SELECT 
-			sm.id, sm.user_id, sm.phone_number, sm.address, sm.hire_date, sm.position, sm.salary, 
-			sm.created_at, sm.updated_at,
-			u.full_name as user_full_name, u.email as user_email, u.username as user_username,
-			r.name as user_role_name
-		FROM staff_members sm
-		LEFT JOIN users u ON sm.user_id = u.id
-		LEFT JOIN roles r ON u.role_id = r.id
-		ORDER BY u.full_name NULLS LAST, sm.id`
-
-	rows, err := db.Query(queryStr)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch staff members: " + err.Error()})
-		return
-	}
-	defer rows.Close()
-
-	staffList := []models.StaffMember{}
-	for rows.Next() {
-		var sm models.StaffMember
-		var userFullName, userEmail, userUsername, userRoleName sql.NullString
-		if err := rows.Scan(
-			&sm.ID, &sm.UserID, &sm.PhoneNumber, &sm.Address, &sm.HireDate, &sm.Position, &sm.Salary,
-			&sm.CreatedAt, &sm.UpdatedAt,
-			&userFullName, &userEmail, &userUsername, &userRoleName,
-		); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan staff member: " + err.Error()})
-			return
-		}
-		if sm.UserID != nil {
-			sm.User = &models.User{}
-			if userFullName.Valid {
-				sm.User.FullName = &userFullName.String
-			}
-			if userEmail.Valid {
-				sm.User.Email = &userEmail.String
-			}
-			if userUsername.Valid {
-				sm.User.Username = userUsername.String
-			}
-			if userRoleName.Valid {
-				sm.User.Role = &models.Role{Name: userRoleName.String}
-			}
-		}
-		staffList = append(staffList, sm)
-	}
-	c.JSON(http.StatusOK, staffList)
+// NewStaffHandler creates a new StaffHandler.
+func NewStaffHandler(ss services.StaffService) *StaffHandler {
+	return &StaffHandler{staffService: ss}
 }
 
-// GetStaffMemberByID handles fetching a single staff member by ID
-func GetStaffMemberByID(c *gin.Context) {
+// --- StaffMember Handler Methods ---
+
+// CreateStaffMember handles the creation of a new staff member.
+func (h *StaffHandler) CreateStaffMember(c *gin.Context) {
+	var req services.CreateStaffMemberRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.LogError(err, "CreateStaffMember: Failed to bind JSON")
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid request payload: "+err.Error(), err.Error()))
+		return
+	}
+
+	staffMember, err := h.staffService.CreateStaffMember(req)
+	if err != nil {
+		utils.LogError(err, "CreateStaffMember: Error from staffService.CreateStaffMember")
+		if errors.Is(err, services.ErrUserForStaffNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeBadRequest, "User specified for staff member not found.", err.Error()))
+		} else if errors.Is(err, services.ErrStaffUserConflict) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "User ID is already linked to another staff member.", err.Error()))
+		} else if errors.Is(err, services.ErrHireDateFormat) || errors.Is(err, services.ErrStaffDataValidation) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed: "+err.Error(), err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to create staff member.", "Internal error"))
+		}
+		return
+	}
+	c.JSON(http.StatusCreated, staffMember)
+}
+
+// GetStaffMembers handles fetching all staff members with pagination and search.
+func (h *StaffHandler) GetStaffMembers(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
+	searchTerm := c.Query("search")
+
+	if page <= 0 { page = 1 }
+	if pageSize <= 0 { pageSize = 10 }
+	
+	var pSearchTerm *string
+	if searchTerm != "" {
+		pSearchTerm = &searchTerm
+	}
+
+	staffMembers, totalCount, err := h.staffService.GetStaffMembers(page, pageSize, pSearchTerm)
+	if err != nil {
+		utils.LogError(err, "GetStaffMembers: Error from staffService.GetStaffMembers")
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch staff members.", "Internal error"))
+		return
+	}
+	
+	if staffMembers == nil {
+	    staffMembers = []models.StaffMember{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":  staffMembers,
+		"total": totalCount,
+		"page":  page,
+		"page_size": pageSize,
+	})
+}
+
+// GetStaffMemberByID handles fetching a single staff member by ID.
+func (h *StaffHandler) GetStaffMemberByID(c *gin.Context) {
 	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	staffID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid staff member ID format.", err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	var sm models.StaffMember
-	var userFullName, userEmail, userUsername, userRoleName sql.NullString
-	queryStr := `
-		SELECT 
-			sm.id, sm.user_id, sm.phone_number, sm.address, sm.hire_date, sm.position, sm.salary, 
-			sm.created_at, sm.updated_at,
-			u.full_name as user_full_name, u.email as user_email, u.username as user_username,
-			r.name as user_role_name
-		FROM staff_members sm
-		LEFT JOIN users u ON sm.user_id = u.id
-		LEFT JOIN roles r ON u.role_id = r.id
-		WHERE sm.id = $1`
-
-	err = db.QueryRow(queryStr, id).Scan(
-		&sm.ID, &sm.UserID, &sm.PhoneNumber, &sm.Address, &sm.HireDate, &sm.Position, &sm.Salary,
-		&sm.CreatedAt, &sm.UpdatedAt,
-		&userFullName, &userEmail, &userUsername, &userRoleName,
-	)
-
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Staff member not found"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch staff member: " + err.Error()})
+	staffMember, err := h.staffService.GetStaffMemberByID(staffID)
+	if err != nil {
+		utils.LogError(err, "GetStaffMemberByID: Error from staffService.GetStaffMemberByID for ID "+idStr)
+		if errors.Is(err, services.ErrStaffNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Staff member not found.", err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch staff member.", "Internal error"))
+		}
 		return
 	}
-
-	if sm.UserID != nil {
-		sm.User = &models.User{}
-		if userFullName.Valid {
-			sm.User.FullName = &userFullName.String
-		}
-		if userEmail.Valid {
-			sm.User.Email = &userEmail.String
-		}
-		if userUsername.Valid {
-			sm.User.Username = userUsername.String
-		}
-		if userRoleName.Valid {
-			sm.User.Role = &models.Role{Name: userRoleName.String}
-		}
-	}
-	c.JSON(http.StatusOK, sm)
+	c.JSON(http.StatusOK, staffMember)
 }
 
-// UpdateStaffMember handles updating an existing staff member
-func UpdateStaffMember(c *gin.Context) {
+// UpdateStaffMember handles updating a staff member.
+func (h *StaffHandler) UpdateStaffMember(c *gin.Context) {
 	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	staffID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid staff member ID format.", err.Error()))
 		return
 	}
 
-	var staff models.StaffMember
-	if err := c.ShouldBindJSON(&staff); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
+	var req services.UpdateStaffMemberRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.LogError(err, "UpdateStaffMember: Failed to bind JSON for ID "+idStr)
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid request payload: "+err.Error(), err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	query := `UPDATE staff_members SET 
-	          user_id = $1, phone_number = $2, address = $3, hire_date = $4, 
-	          position = $5, salary = $6, updated_at = $7
-	          WHERE id = $8 
-	          RETURNING id, user_id, phone_number, address, hire_date, position, salary, created_at, updated_at`
-
-	staff.UpdatedAt = time.Now()
-
-	err = db.QueryRow(query,
-		staff.UserID, staff.PhoneNumber, staff.Address, staff.HireDate,
-		staff.Position, staff.Salary, staff.UpdatedAt, id,
-	).Scan(
-		&staff.ID, &staff.UserID, &staff.PhoneNumber, &staff.Address, &staff.HireDate,
-		&staff.Position, &staff.Salary, &staff.CreatedAt, &staff.UpdatedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Staff member not found to update"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update staff member: " + err.Error()})
+	staffMember, err := h.staffService.UpdateStaffMember(staffID, req)
+	if err != nil {
+		utils.LogError(err, "UpdateStaffMember: Error from staffService.UpdateStaffMember for ID "+idStr)
+		if errors.Is(err, services.ErrStaffNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Staff member not found to update.", err.Error()))
+		} else if errors.Is(err, services.ErrHireDateFormat) || errors.Is(err, services.ErrStaffDataValidation) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed: "+err.Error(), err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to update staff member.", "Internal error"))
+		}
 		return
 	}
-	staff.ID = id // Ensure ID from path is used
-	c.JSON(http.StatusOK, staff)
+	c.JSON(http.StatusOK, staffMember)
 }
 
-// DeleteStaffMember handles deleting a staff member
-// Consider implications: what happens to shifts, orders, bookings associated with this staff member?
-// DB schema uses ON DELETE SET NULL or ON DELETE CASCADE for staff_id in related tables.
-func DeleteStaffMember(c *gin.Context) {
+// DeleteStaffMember handles deleting a staff member.
+func (h *StaffHandler) DeleteStaffMember(c *gin.Context) {
 	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	staffID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid staff member ID format.", err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	// Optional: Check if the staff member has an associated user account and decide if it should be deactivated/deleted.
-	// For now, just delete the staff_member entry.
-	result, err := db.Exec("DELETE FROM staff_members WHERE id = $1", id)
+	err = h.staffService.DeleteStaffMember(staffID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete staff member: " + err.Error()})
-		return
-	}
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Staff member not found to delete"})
+		utils.LogError(err, "DeleteStaffMember: Error from staffService.DeleteStaffMember for ID "+idStr)
+		if errors.Is(err, services.ErrStaffNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Staff member not found to delete.", err.Error()))
+		} else if errors.Is(err, services.ErrStaffInUse) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Staff member cannot be deleted as they are referenced in other records.", err.Error()))
+		}else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to delete staff member.", "Internal error"))
+		}
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Staff member deleted successfully"})
 }
 
-// Shift Handlers
+// --- Shift Handler Methods ---
 
-// CreateShift handles creation of a new shift
-func CreateShift(c *gin.Context) {
-	var shift models.Shift
-	if err := c.ShouldBindJSON(&shift); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
+// CreateShift handles the creation of a new shift.
+func (h *StaffHandler) CreateShift(c *gin.Context) {
+	var req services.CreateShiftRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.LogError(err, "CreateShift: Failed to bind JSON")
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid request payload: "+err.Error(), err.Error()))
 		return
 	}
 
-	if shift.EndTime.Before(shift.StartTime) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "End time cannot be before start time"})
-		return
-	}
-
-	db := database.GetDB()
-	query := `INSERT INTO shifts (staff_id, start_time, end_time, notes, created_at, updated_at)
-	          VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at, updated_at`
-
-	shift.CreatedAt = time.Now()
-	shift.UpdatedAt = time.Now()
-
-	err := db.QueryRow(query, 
-		shift.StaffID, shift.StartTime, shift.EndTime, shift.Notes, 
-		shift.CreatedAt, shift.UpdatedAt,
-	).Scan(&shift.ID, &shift.CreatedAt, &shift.UpdatedAt)
-
+	shift, err := h.staffService.CreateShift(req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create shift: " + err.Error()})
+		utils.LogError(err, "CreateShift: Error from staffService.CreateShift")
+		if errors.Is(err, services.ErrStaffNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeBadRequest, "Staff member for shift not found.", err.Error()))
+		} else if errors.Is(err, services.ErrShiftTimeFormat) || errors.Is(err, services.ErrShiftValidation) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed: "+err.Error(), err.Error()))
+		} else if errors.Is(err, services.ErrShiftOverlap) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Shift overlaps with an existing shift.", err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to create shift.", "Internal error"))
+		}
 		return
 	}
 	c.JSON(http.StatusCreated, shift)
 }
 
-// GetShifts handles fetching all shifts, optionally filtered by staff_id or date range
-func GetShifts(c *gin.Context) {
-	db := database.GetDB()
+// GetShifts handles fetching all shifts with pagination and filters.
+func (h *StaffHandler) GetShifts(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
 	
-	baseQuery := `
-		SELECT s.id, s.staff_id, s.start_time, s.end_time, s.notes, s.created_at, s.updated_at,
-		       sm.user_id, u.full_name as staff_full_name
-		FROM shifts s
-		JOIN staff_members sm ON s.staff_id = sm.id
-		LEFT JOIN users u ON sm.user_id = u.id`
-	
-	var conditions []string
-	var args []interface{}
-	argCounter := 1
+	if page <= 0 { page = 1 }
+	if pageSize <= 0 { pageSize = 10 }
 
-	staffIDStr := c.Query("staff_id")
-	if staffIDStr != "" {
-		staffID, err := strconv.ParseInt(staffIDStr, 10, 64)
+	var staffID *int64
+	if staffIDStr := c.Query("staff_id"); staffIDStr != "" {
+		id, err := strconv.ParseInt(staffIDStr, 10, 64)
 		if err == nil {
-			conditions = append(conditions, "s.staff_id = $" + strconv.Itoa(argCounter))
-			args = append(args, staffID)
-			argCounter++
-		}
-	}
-
-	startDateStr := c.Query("start_date") // Expected format: YYYY-MM-DD
-	endDateStr := c.Query("end_date")     // Expected format: YYYY-MM-DD
-
-	if startDateStr != "" {
-		startDate, err := time.Parse("2006-01-02", startDateStr)
-		if err == nil {
-			conditions = append(conditions, "s.start_time >= $" + strconv.Itoa(argCounter))
-			args = append(args, startDate)
-			argCounter++
-		}
-	}
-	if endDateStr != "" {
-		endDate, err := time.Parse("2006-01-02", endDateStr)
-		if err == nil {
-			// To include shifts on the end_date, we look for start_time < (endDate + 1 day)
-			conditions = append(conditions, "s.start_time < $" + strconv.Itoa(argCounter))
-			args = append(args, endDate.AddDate(0,0,1))
-			argCounter++
-		}
-	}
-
-	if len(conditions) > 0 {
-		baseQuery += " WHERE " + string(join(conditions, " AND ")) // join function from inventory_handlers.go
-	}
-	baseQuery += " ORDER BY s.start_time DESC"
-
-	rows, err := db.Query(baseQuery, args...)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch shifts: " + err.Error()})
-		return
-	}
-	defer rows.Close()
-
-	shifts := []models.Shift{}
-	for rows.Next() {
-		var sh models.Shift
-		var staffUserID sql.NullInt64
-		var staffFullName sql.NullString
-		if err := rows.Scan(
-			&sh.ID, &sh.StaffID, &sh.StartTime, &sh.EndTime, &sh.Notes, 
-			&sh.CreatedAt, &sh.UpdatedAt,
-			&staffUserID, &staffFullName,
-		); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan shift: " + err.Error()})
+			staffID = &id
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid staff_id format.", err.Error()))
 			return
 		}
-		sh.StaffMember = &models.StaffMember{ID: sh.StaffID}
-		if staffUserID.Valid {
-			sh.StaffMember.UserID = &staffUserID.Int64
-		}
-		if staffFullName.Valid {
-			sh.StaffMember.User = &models.User{FullName: &staffFullName.String}
-		}
-		shifts = append(shifts, sh)
 	}
-	c.JSON(http.StatusOK, shifts)
+	
+	startTimeFromStr := c.Query("start_time_from")
+	startTimeToStr := c.Query("start_time_to")
+	var pStartTimeFrom, pStartTimeTo *string
+	if startTimeFromStr != "" { pStartTimeFrom = &startTimeFromStr }
+	if startTimeToStr != "" { pStartTimeTo = &startTimeToStr }
+
+
+	shifts, totalCount, err := h.staffService.GetShifts(staffID, pStartTimeFrom, pStartTimeTo, page, pageSize)
+	if err != nil {
+		utils.LogError(err, "GetShifts: Error from staffService.GetShifts")
+		if errors.Is(err, services.ErrShiftTimeFormat) || errors.Is(err, services.ErrShiftValidation) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed for time parameters: "+err.Error(), err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch shifts.", "Internal error"))
+		}
+		return
+	}
+	
+	if shifts == nil {
+	    shifts = []models.Shift{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":  shifts,
+		"total": totalCount,
+		"page":  page,
+		"page_size": pageSize,
+	})
 }
 
-// GetShiftByID handles fetching a single shift by ID
-func GetShiftByID(c *gin.Context) {
+// GetShiftByID handles fetching a single shift by ID.
+func (h *StaffHandler) GetShiftByID(c *gin.Context) {
 	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	shiftID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid shift ID"})
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid shift ID format.", err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	var sh models.Shift
-	var staffUserID sql.NullInt64
-	var staffFullName sql.NullString
-	query := `
-		SELECT s.id, s.staff_id, s.start_time, s.end_time, s.notes, s.created_at, s.updated_at,
-		       sm.user_id, u.full_name as staff_full_name
-		FROM shifts s
-		JOIN staff_members sm ON s.staff_id = sm.id
-		LEFT JOIN users u ON sm.user_id = u.id
-		WHERE s.id = $1`
-	err = db.QueryRow(query, id).Scan(
-		&sh.ID, &sh.StaffID, &sh.StartTime, &sh.EndTime, &sh.Notes, 
-		&sh.CreatedAt, &sh.UpdatedAt,
-		&staffUserID, &staffFullName,
-	)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Shift not found"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch shift: " + err.Error()})
-		return
-	}
-	sh.StaffMember = &models.StaffMember{ID: sh.StaffID}
-	if staffUserID.Valid {
-		sh.StaffMember.UserID = &staffUserID.Int64
-	}
-	if staffFullName.Valid {
-		sh.StaffMember.User = &models.User{FullName: &staffFullName.String}
-	}
-	c.JSON(http.StatusOK, sh)
-}
-
-// UpdateShift handles updating an existing shift
-func UpdateShift(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	shift, err := h.staffService.GetShiftByID(shiftID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid shift ID"})
+		utils.LogError(err, "GetShiftByID: Error from staffService.GetShiftByID for ID "+idStr)
+		if errors.Is(err, services.ErrShiftNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Shift not found.", err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch shift.", "Internal error"))
+		}
 		return
 	}
-
-	var shift models.Shift
-	if err := c.ShouldBindJSON(&shift); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
-		return
-	}
-
-	if shift.EndTime.Before(shift.StartTime) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "End time cannot be before start time"})
-		return
-	}
-
-	db := database.GetDB()
-	query := `UPDATE shifts SET 
-	          staff_id = $1, start_time = $2, end_time = $3, notes = $4, updated_at = $5
-	          WHERE id = $6 
-	          RETURNING id, staff_id, start_time, end_time, notes, created_at, updated_at`
-
-	shift.UpdatedAt = time.Now()
-
-	err = db.QueryRow(query, 
-		shift.StaffID, shift.StartTime, shift.EndTime, shift.Notes, shift.UpdatedAt, id,
-	).Scan(
-		&shift.ID, &shift.StaffID, &shift.StartTime, &shift.EndTime, &shift.Notes, 
-		&shift.CreatedAt, &shift.UpdatedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Shift not found to update"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update shift: " + err.Error()})
-		return
-	}
-	shift.ID = id // Ensure ID from path is used
 	c.JSON(http.StatusOK, shift)
 }
 
-// DeleteShift handles deleting a shift
-func DeleteShift(c *gin.Context) {
+// UpdateShift handles updating a shift.
+func (h *StaffHandler) UpdateShift(c *gin.Context) {
 	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	shiftID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid shift ID"})
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid shift ID format.", err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	result, err := db.Exec("DELETE FROM shifts WHERE id = $1", id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete shift: " + err.Error()})
+	var req services.UpdateShiftRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.LogError(err, "UpdateShift: Failed to bind JSON for ID "+idStr)
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid request payload: "+err.Error(), err.Error()))
 		return
 	}
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Shift not found to delete"})
+
+	shift, err := h.staffService.UpdateShift(shiftID, req)
+	if err != nil {
+		utils.LogError(err, "UpdateShift: Error from staffService.UpdateShift for ID "+idStr)
+		if errors.Is(err, services.ErrShiftNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Shift not found to update.", err.Error()))
+		} else if errors.Is(err, services.ErrShiftTimeFormat) || errors.Is(err, services.ErrShiftValidation) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed: "+err.Error(), err.Error()))
+		} else if errors.Is(err, services.ErrShiftOverlap) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Updated shift overlaps with an existing shift.", err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to update shift.", "Internal error"))
+		}
+		return
+	}
+	c.JSON(http.StatusOK, shift)
+}
+
+// DeleteShift handles deleting a shift.
+func (h *StaffHandler) DeleteShift(c *gin.Context) {
+	idStr := c.Param("id")
+	shiftID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid shift ID format.", err.Error()))
+		return
+	}
+
+	err = h.staffService.DeleteShift(shiftID)
+	if err != nil {
+		utils.LogError(err, "DeleteShift: Error from staffService.DeleteShift for ID "+idStr)
+		if errors.Is(err, services.ErrShiftNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Shift not found to delete.", err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to delete shift.", "Internal error"))
+		}
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Shift deleted successfully"})
 }
 
+// Ensure old standalone functions are removed or commented out.
+// e.g., func CreateStaffMember(c *gin.Context) { ... }
+// func GetStaffMembers(c *gin.Context) { ... }
+// ...etc...
+// func CreateShift(c *gin.Context) { ... }
+// ...etc...

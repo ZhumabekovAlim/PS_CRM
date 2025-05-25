@@ -1,177 +1,167 @@
 package handlers
 
 import (
-	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
-	"time"
 
-	"ps_club_backend/internal/database"
-	"ps_club_backend/internal/models"
+	"ps_club_backend/internal/services"
+	"ps_club_backend/pkg/utils"
 
 	"github.com/gin-gonic/gin"
 )
 
-// CreateClient handles the creation of a new client
-func CreateClient(c *gin.Context) {
-	var client models.Client
-	if err := c.ShouldBindJSON(&client); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
+// ClientHandler holds the client service.
+type ClientHandler struct {
+	clientService services.ClientService
+}
+
+// NewClientHandler creates a new ClientHandler.
+func NewClientHandler(cs services.ClientService) *ClientHandler {
+	return &ClientHandler{clientService: cs}
+}
+
+// CreateClient handles the creation of a new client.
+func (h *ClientHandler) CreateClient(c *gin.Context) {
+	var req services.CreateClientRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.LogError(err, "CreateClient: Failed to bind JSON")
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid request payload: "+err.Error(), err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	query := `INSERT INTO clients (full_name, phone_number, email, date_of_birth, loyalty_points, notes, created_at, updated_at)
-	          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at, updated_at`
-
-	client.CreatedAt = time.Now()
-	client.UpdatedAt = time.Now()
-
-	// Handle date_of_birth string to time.Time conversion if necessary, or store as string if DB schema supports it directly.
-	// For simplicity, assuming date_of_birth is a string that fits the DB.
-
-	err := db.QueryRow(query, 
-		client.FullName, client.PhoneNumber, client.Email, client.DateOfBirth, 
-		client.LoyaltyPoints, client.Notes, client.CreatedAt, client.UpdatedAt,
-	).Scan(&client.ID, &client.CreatedAt, &client.UpdatedAt)
-
+	client, err := h.clientService.CreateClient(req)
 	if err != nil {
-		// Check for unique constraint violation on phone_number or email if applicable
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create client: " + err.Error()})
+		utils.LogError(err, "CreateClient: Error from clientService.CreateClient")
+		if errors.Is(err, services.ErrPhoneNumberExists) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Phone number already exists.", err.Error()))
+		} else if errors.Is(err, services.ErrEmailExists) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Email already exists.", err.Error()))
+		} else if errors.Is(err, services.ErrClientValidation) || errors.Is(err, services.ErrDateFormat){
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed: "+err.Error(), err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to create client.", "Internal error"))
+		}
 		return
 	}
 	c.JSON(http.StatusCreated, client)
 }
 
-// GetClients handles fetching all clients, with optional search/filtering
-func GetClients(c *gin.Context) {
-	db := database.GetDB()
-	
-	// Basic query, can be expanded with search parameters
-	// e.g., c.Query("search_term") to filter by name or phone
+// GetClients handles fetching all clients with pagination and search.
+func (h *ClientHandler) GetClients(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
 	searchTerm := c.Query("search")
 
-	queryStr := "SELECT id, full_name, phone_number, email, date_of_birth, loyalty_points, notes, created_at, updated_at FROM clients"
-	var args []interface{}
+	if page <= 0 { page = 1 }
+	if pageSize <= 0 { pageSize = 10 }
+	
+	var pSearchTerm *string
 	if searchTerm != "" {
-		queryStr += " WHERE full_name ILIKE $1 OR phone_number ILIKE $1 OR email ILIKE $1"
-		args = append(args, "%"+searchTerm+"%")
+		pSearchTerm = &searchTerm
 	}
-	queryStr += " ORDER BY full_name"
 
-	rows, err := db.Query(queryStr, args...)
+	clients, totalCount, err := h.clientService.GetClients(page, pageSize, pSearchTerm)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch clients: " + err.Error()})
+		utils.LogError(err, "GetClients: Error from clientService.GetClients")
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch clients.", "Internal error"))
 		return
 	}
-	defer rows.Close()
+	
+	if clients == nil {
+	    clients = []models.Client{}
+	}
 
-	clients := []models.Client{}
-	for rows.Next() {
-		var cli models.Client
-		if err := rows.Scan(
-			&cli.ID, &cli.FullName, &cli.PhoneNumber, &cli.Email, 
-			&cli.DateOfBirth, &cli.LoyaltyPoints, &cli.Notes, &cli.CreatedAt, &cli.UpdatedAt,
-		); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan client: " + err.Error()})
-			return
+	c.JSON(http.StatusOK, gin.H{
+		"data":  clients,
+		"total": totalCount,
+		"page":  page,
+		"page_size": pageSize,
+	})
+}
+
+// GetClientByID handles fetching a single client by ID.
+func (h *ClientHandler) GetClientByID(c *gin.Context) {
+	idStr := c.Param("id")
+	clientID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid client ID format.", err.Error()))
+		return
+	}
+
+	client, err := h.clientService.GetClientByID(clientID)
+	if err != nil {
+		utils.LogError(err, "GetClientByID: Error from clientService.GetClientByID for ID "+idStr)
+		if errors.Is(err, services.ErrClientNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Client not found.", err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch client.", "Internal error"))
 		}
-		clients = append(clients, cli)
-	}
-	c.JSON(http.StatusOK, clients)
-}
-
-// GetClientByID handles fetching a single client by ID
-func GetClientByID(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid client ID"})
 		return
 	}
-
-	db := database.GetDB()
-	var cli models.Client
-	query := "SELECT id, full_name, phone_number, email, date_of_birth, loyalty_points, notes, created_at, updated_at FROM clients WHERE id = $1"
-	err = db.QueryRow(query, id).Scan(
-		&cli.ID, &cli.FullName, &cli.PhoneNumber, &cli.Email, 
-		&cli.DateOfBirth, &cli.LoyaltyPoints, &cli.Notes, &cli.CreatedAt, &cli.UpdatedAt,
-	)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Client not found"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch client: " + err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, cli)
-}
-
-// UpdateClient handles updating an existing client
-func UpdateClient(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid client ID"})
-		return
-	}
-
-	var client models.Client
-	if err := c.ShouldBindJSON(&client); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
-		return
-	}
-
-	db := database.GetDB()
-	query := `UPDATE clients SET 
-	          full_name = $1, phone_number = $2, email = $3, date_of_birth = $4, 
-	          loyalty_points = $5, notes = $6, updated_at = $7
-	          WHERE id = $8 
-	          RETURNING id, full_name, phone_number, email, date_of_birth, loyalty_points, notes, created_at, updated_at`
-
-	client.UpdatedAt = time.Now()
-
-	err = db.QueryRow(query, 
-		client.FullName, client.PhoneNumber, client.Email, client.DateOfBirth, 
-		client.LoyaltyPoints, client.Notes, client.UpdatedAt, id,
-	).Scan(
-		&client.ID, &client.FullName, &client.PhoneNumber, &client.Email, 
-		&client.DateOfBirth, &client.LoyaltyPoints, &client.Notes, &client.CreatedAt, &client.UpdatedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Client not found to update"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update client: " + err.Error()})
-		return
-	}
-	client.ID = id // Ensure ID from path is used
 	c.JSON(http.StatusOK, client)
 }
 
-// DeleteClient handles deleting a client
-func DeleteClient(c *gin.Context) {
+// UpdateClient handles updating a client.
+func (h *ClientHandler) UpdateClient(c *gin.Context) {
 	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	clientID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid client ID"})
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid client ID format.", err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	// Consider implications: what happens to bookings/orders associated with this client?
-	// DB schema uses ON DELETE SET NULL for client_id in bookings and orders, so those records won't be deleted.
-	result, err := db.Exec("DELETE FROM clients WHERE id = $1", id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete client: " + err.Error()})
+	var req services.UpdateClientRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.LogError(err, "UpdateClient: Failed to bind JSON for ID "+idStr)
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid request payload: "+err.Error(), err.Error()))
 		return
 	}
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Client not found to delete"})
+
+	client, err := h.clientService.UpdateClient(clientID, req)
+	if err != nil {
+		utils.LogError(err, "UpdateClient: Error from clientService.UpdateClient for ID "+idStr)
+		if errors.Is(err, services.ErrClientNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Client not found to update.", err.Error()))
+		} else if errors.Is(err, services.ErrPhoneNumberExists) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Phone number already exists.", err.Error()))
+		} else if errors.Is(err, services.ErrEmailExists) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Email already exists.", err.Error()))
+		} else if errors.Is(err, services.ErrClientValidation) || errors.Is(err, services.ErrDateFormat){
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed: "+err.Error(), err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to update client.", "Internal error"))
+		}
+		return
+	}
+	c.JSON(http.StatusOK, client)
+}
+
+// DeleteClient handles deleting a client.
+func (h *ClientHandler) DeleteClient(c *gin.Context) {
+	idStr := c.Param("id")
+	clientID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid client ID format.", err.Error()))
+		return
+	}
+
+	err = h.clientService.DeleteClient(clientID)
+	if err != nil {
+		utils.LogError(err, "DeleteClient: Error from clientService.DeleteClient for ID "+idStr)
+		if errors.Is(err, services.ErrClientNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Client not found to delete.", err.Error()))
+		} else if errors.Is(err, services.ErrClientInUse) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Client cannot be deleted as they are referenced in other records.", err.Error()))
+		}else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to delete client.", "Internal error"))
+		}
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Client deleted successfully"})
 }
 
+// Remove or comment out old standalone functions if they existed, e.g.:
+// func CreateClient(c *gin.Context) { /* ... */ }
+// func GetClients(c *gin.Context) { /* ... */ }
+// ... etc. ...
