@@ -41,6 +41,7 @@ const (
 	ErrCodeConflict            = "CONFLICT"
 	ErrCodeInternalServerError = "INTERNAL_SERVER_ERROR"
 	ErrCodeValidationFailed    = "VALIDATION_FAILED"
+	ErrCodeNotImplemented    = "NOT_IMPLEMENTED" // New code
 )
 
 // Validation functions
