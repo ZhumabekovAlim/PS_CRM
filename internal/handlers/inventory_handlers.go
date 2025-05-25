@@ -1,381 +1,316 @@
 package handlers
 
 import (
-	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
-	"time"
 
-	"ps_club_backend/internal/database"
-	"ps_club_backend/internal/models"
+	"ps_club_backend/internal/services"
+	"ps_club_backend/pkg/utils"
 
 	"github.com/gin-gonic/gin"
 )
 
-// Pricelist Categories Handlers
+// PricelistHandler holds the pricelist service.
+type PricelistHandler struct {
+	pricelistService services.PricelistService
+}
 
-// CreatePricelistCategory handles creation of a new pricelist category
-func CreatePricelistCategory(c *gin.Context) {
-	var category models.PricelistCategory
-	if err := c.ShouldBindJSON(&category); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
+// NewPricelistHandler creates a new PricelistHandler.
+func NewPricelistHandler(ps services.PricelistService) *PricelistHandler {
+	return &PricelistHandler{pricelistService: ps}
+}
+
+// --- PricelistCategory Handler Methods ---
+
+// CreatePricelistCategory handles the creation of a new pricelist category.
+func (h *PricelistHandler) CreatePricelistCategory(c *gin.Context) {
+	var req services.CreatePricelistCategoryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.LogError(err, "CreatePricelistCategory: Failed to bind JSON")
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid request payload: "+err.Error(), err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	query := `INSERT INTO pricelist_categories (name, description, created_at, updated_at)
-	          VALUES ($1, $2, $3, $4) RETURNING id, created_at, updated_at`
-
-	category.CreatedAt = time.Now()
-	category.UpdatedAt = time.Now()
-
-	err := db.QueryRow(query, category.Name, category.Description, category.CreatedAt, category.UpdatedAt).
-		Scan(&category.ID, &category.CreatedAt, &category.UpdatedAt)
+	category, err := h.pricelistService.CreateCategory(req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create pricelist category: " + err.Error()})
+		utils.LogError(err, "CreatePricelistCategory: Error from pricelistService.CreateCategory")
+		if errors.Is(err, services.ErrCategoryNameExists) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Category name already exists.", err.Error()))
+		} else if errors.Is(err, services.ErrValidation) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed: "+err.Error(), err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to create category.", "Internal error"))
+		}
 		return
 	}
 	c.JSON(http.StatusCreated, category)
 }
 
-// GetPricelistCategories handles fetching all pricelist categories
-func GetPricelistCategories(c *gin.Context) {
-	db := database.GetDB()
-	rows, err := db.Query("SELECT id, name, description, created_at, updated_at FROM pricelist_categories ORDER BY name")
+// GetPricelistCategories handles fetching all pricelist categories with pagination.
+func (h *PricelistHandler) GetPricelistCategories(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
+
+	if page <= 0 { page = 1 }
+	if pageSize <= 0 { pageSize = 10 }
+
+
+	categories, totalCount, err := h.pricelistService.GetCategories(page, pageSize)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch pricelist categories: " + err.Error()})
+		utils.LogError(err, "GetPricelistCategories: Error from pricelistService.GetCategories")
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch categories.", "Internal error"))
 		return
 	}
-	defer rows.Close()
+	
+	if categories == nil { // Ensure response is an empty list, not null
+	    categories = []models.PricelistCategory{}
+	}
 
-	categories := []models.PricelistCategory{}
-	for rows.Next() {
-		var cat models.PricelistCategory
-		if err := rows.Scan(&cat.ID, &cat.Name, &cat.Description, &cat.CreatedAt, &cat.UpdatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan pricelist category: " + err.Error()})
-			return
+	c.JSON(http.StatusOK, gin.H{
+		"data":  categories,
+		"total": totalCount,
+		"page":  page,
+		"page_size": pageSize,
+	})
+}
+
+// GetPricelistCategoryByID handles fetching a single pricelist category by ID.
+func (h *PricelistHandler) GetPricelistCategoryByID(c *gin.Context) {
+	idStr := c.Param("id")
+	categoryID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid category ID format.", err.Error()))
+		return
+	}
+
+	category, err := h.pricelistService.GetCategoryByID(categoryID)
+	if err != nil {
+		utils.LogError(err, "GetPricelistCategoryByID: Error from pricelistService.GetCategoryByID for ID "+idStr)
+		if errors.Is(err, services.ErrCategoryNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Category not found.", err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch category.", "Internal error"))
 		}
-		categories = append(categories, cat)
-	}
-	c.JSON(http.StatusOK, categories)
-}
-
-// GetPricelistCategoryByID handles fetching a single pricelist category by ID
-func GetPricelistCategoryByID(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid category ID"})
 		return
 	}
-
-	db := database.GetDB()
-	var cat models.PricelistCategory
-	query := "SELECT id, name, description, created_at, updated_at FROM pricelist_categories WHERE id = $1"
-	err = db.QueryRow(query, id).Scan(&cat.ID, &cat.Name, &cat.Description, &cat.CreatedAt, &cat.UpdatedAt)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Pricelist category not found"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch pricelist category: " + err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, cat)
-}
-
-// UpdatePricelistCategory handles updating an existing pricelist category
-func UpdatePricelistCategory(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid category ID"})
-		return
-	}
-
-	var category models.PricelistCategory
-	if err := c.ShouldBindJSON(&category); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
-		return
-	}
-
-	db := database.GetDB()
-	query := `UPDATE pricelist_categories SET name = $1, description = $2, updated_at = $3
-	          WHERE id = $4 RETURNING id, name, description, created_at, updated_at`
-
-	category.UpdatedAt = time.Now()
-
-	err = db.QueryRow(query, category.Name, category.Description, category.UpdatedAt, id).
-		Scan(&category.ID, &category.Name, &category.Description, &category.CreatedAt, &category.UpdatedAt)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Pricelist category not found to update"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update pricelist category: " + err.Error()})
-		return
-	}
-	category.ID = id // Ensure the ID from path is used
 	c.JSON(http.StatusOK, category)
 }
 
-// DeletePricelistCategory handles deleting a pricelist category
-func DeletePricelistCategory(c *gin.Context) {
+// UpdatePricelistCategory handles updating a pricelist category.
+func (h *PricelistHandler) UpdatePricelistCategory(c *gin.Context) {
 	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	categoryID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid category ID"})
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid category ID format.", err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	// Check if items are associated with this category first
-	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM pricelist_items WHERE category_id = $1", id).Scan(&count)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check associated items: " + err.Error()})
-		return
-	}
-	if count > 0 {
-		c.JSON(http.StatusConflict, gin.H{"error": "Cannot delete category: it has associated pricelist items. Please reassign or delete items first."})
+	var req services.UpdatePricelistCategoryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.LogError(err, "UpdatePricelistCategory: Failed to bind JSON for ID "+idStr)
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid request payload: "+err.Error(), err.Error()))
 		return
 	}
 
-	result, err := db.Exec("DELETE FROM pricelist_categories WHERE id = $1", id)
+	category, err := h.pricelistService.UpdateCategory(categoryID, req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete pricelist category: " + err.Error()})
+		utils.LogError(err, "UpdatePricelistCategory: Error from pricelistService.UpdateCategory for ID "+idStr)
+		if errors.Is(err, services.ErrCategoryNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Category not found to update.", err.Error()))
+		} else if errors.Is(err, services.ErrCategoryNameExists) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Category name already exists.", err.Error()))
+		} else if errors.Is(err, services.ErrValidation) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed: "+err.Error(), err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to update category.", "Internal error"))
+		}
 		return
 	}
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Pricelist category not found to delete"})
+	c.JSON(http.StatusOK, category)
+}
+
+// DeletePricelistCategory handles deleting a pricelist category.
+func (h *PricelistHandler) DeletePricelistCategory(c *gin.Context) {
+	idStr := c.Param("id")
+	categoryID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid category ID format.", err.Error()))
+		return
+	}
+
+	err = h.pricelistService.DeleteCategory(categoryID)
+	if err != nil {
+		utils.LogError(err, "DeletePricelistCategory: Error from pricelistService.DeleteCategory for ID "+idStr)
+		if errors.Is(err, services.ErrCategoryNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Category not found to delete.", err.Error()))
+		} else if errors.Is(err, services.ErrPricelistForeignKey) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Cannot delete category: it is currently in use.", err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to delete category.", "Internal error"))
+		}
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Pricelist category deleted successfully"})
 }
 
-// Pricelist Items Handlers
+// --- PricelistItem Handler Methods ---
 
-// CreatePricelistItem handles creation of a new pricelist item
-func CreatePricelistItem(c *gin.Context) {
-	var item models.PricelistItem
-	if err := c.ShouldBindJSON(&item); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
+// CreatePricelistItem handles the creation of a new pricelist item.
+func (h *PricelistHandler) CreatePricelistItem(c *gin.Context) {
+	var req services.CreatePricelistItemRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.LogError(err, "CreatePricelistItem: Failed to bind JSON")
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid request payload: "+err.Error(), err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	query := `INSERT INTO pricelist_items 
-	          (category_id, name, description, price, sku, is_available, item_type, current_stock, low_stock_threshold, created_at, updated_at)
-	          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) 
-	          RETURNING id, created_at, updated_at`
-
-	item.CreatedAt = time.Now()
-	item.UpdatedAt = time.Now()
-	if item.IsAvailable == false { // Default from DB is true, but if payload sets it, respect it.
-        // No action needed, will be set by the query
-    } else {
-        item.IsAvailable = true // Ensure it's true if not specified or specified as true
-    }
-
-	err := db.QueryRow(query, 
-		item.CategoryID, item.Name, item.Description, item.Price, item.SKU, item.IsAvailable, 
-		item.ItemType, item.CurrentStock, item.LowStockThreshold, item.CreatedAt, item.UpdatedAt,
-	).Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
-
+	item, err := h.pricelistService.CreateItem(req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create pricelist item: " + err.Error()})
+		utils.LogError(err, "CreatePricelistItem: Error from pricelistService.CreateItem")
+		if errors.Is(err, services.ErrItemNameConflict) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Item name or SKU already exists or conflicts.", err.Error()))
+		} else if errors.Is(err, services.ErrCategoryNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeBadRequest, "Invalid category ID provided.", err.Error()))
+		} else if errors.Is(err, services.ErrValidation) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed: "+err.Error(), err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to create item.", "Internal error"))
+		}
 		return
 	}
 	c.JSON(http.StatusCreated, item)
 }
 
-// GetPricelistItems handles fetching all pricelist items, optionally filtered by category_id or item_type
-func GetPricelistItems(c *gin.Context) {
-	db := database.GetDB()
+// GetPricelistItems handles fetching all pricelist items with filters and pagination.
+func (h *PricelistHandler) GetPricelistItems(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
 	
-	baseQuery := `SELECT pi.id, pi.category_id, pi.name, pi.description, pi.price, pi.sku, 
-	                     pi.is_available, pi.item_type, pi.current_stock, pi.low_stock_threshold, 
-	                     pi.created_at, pi.updated_at, pc.name as category_name
-	              FROM pricelist_items pi
-	              JOIN pricelist_categories pc ON pi.category_id = pc.id`
-	
-	var conditions []string
-	var args []interface{}
-	argCounter := 1
+	if page <= 0 { page = 1 }
+	if pageSize <= 0 { pageSize = 10 }
 
-	categoryID := c.Query("category_id")
-	if categoryID != "" {
-		conditions = append(conditions, "pi.category_id = $" + strconv.Itoa(argCounter))
-		args = append(args, categoryID)
-		argCounter++
-	}
 
-	itemType := c.Query("item_type")
-	if itemType != "" {
-		conditions = append(conditions, "pi.item_type = $" + strconv.Itoa(argCounter))
-		args = append(args, itemType)
-		argCounter++
-	}
-
-	if len(conditions) > 0 {
-		baseQuery += " WHERE " + string(join(conditions, " AND "))
-	}
-	baseQuery += " ORDER BY pi.name"
-
-	rows, err := db.Query(baseQuery, args...)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch pricelist items: " + err.Error()})
-		return
-	}
-	defer rows.Close()
-
-	items := []models.PricelistItem{}
-	for rows.Next() {
-		var item models.PricelistItem
-		var categoryName string
-		if err := rows.Scan(
-			&item.ID, &item.CategoryID, &item.Name, &item.Description, &item.Price, &item.SKU, 
-			&item.IsAvailable, &item.ItemType, &item.CurrentStock, &item.LowStockThreshold, 
-			&item.CreatedAt, &item.UpdatedAt, &categoryName,
-		); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan pricelist item: " + err.Error()})
+	var categoryID *int64
+	if categoryIDStr := c.Query("category_id"); categoryIDStr != "" {
+		id, err := strconv.ParseInt(categoryIDStr, 10, 64)
+		if err == nil {
+			categoryID = &id
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid category_id format.", err.Error()))
 			return
 		}
-		item.Category = &models.PricelistCategory{ID: item.CategoryID, Name: categoryName} // Populate nested category info
-		items = append(items, item)
 	}
-	c.JSON(http.StatusOK, items)
-}
 
-// Helper function to join strings (needed because strings.Join needs a slice of strings)
-func join(s []string, sep string) string {
-    if len(s) == 0 {
-        return ""
-    }
-    if len(s) == 1 {
-        return s[0]
-    }
-    n := len(sep) * (len(s) - 1)
-    for i := 0; i < len(s); i++ {
-        n += len(s[i])
-    }
+	var itemType *string
+	if itemTypeStr := c.Query("item_type"); itemTypeStr != "" {
+		itemType = &itemTypeStr
+	}
 
-    var b []byte
-    bp := 0
-    b = make([]byte, n)
-    copy(b[bp:], s[0])
-    bp += len(s[0])
-    for _, s := range s[1:] {
-        copy(b[bp:], sep)
-        bp += len(sep)
-        copy(b[bp:], s)
-        bp += len(s)
-    }
-    return string(b)
-}
-
-
-// GetPricelistItemByID handles fetching a single pricelist item by ID
-func GetPricelistItemByID(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	items, totalCount, err := h.pricelistService.GetItems(categoryID, itemType, page, pageSize)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid item ID"})
+		utils.LogError(err, "GetPricelistItems: Error from pricelistService.GetItems")
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch items.", "Internal error"))
+		return
+	}
+	
+	if items == nil { // Ensure response is an empty list, not null
+	    items = []models.PricelistItem{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":  items,
+		"total": totalCount,
+		"page": page,
+		"page_size": pageSize,
+	})
+}
+
+// GetPricelistItemByID handles fetching a single pricelist item by ID.
+func (h *PricelistHandler) GetPricelistItemByID(c *gin.Context) {
+	idStr := c.Param("id")
+	itemID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid item ID format.", err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	var item models.PricelistItem
-	var categoryName string
-	query := `SELECT pi.id, pi.category_id, pi.name, pi.description, pi.price, pi.sku, 
-	                 pi.is_available, pi.item_type, pi.current_stock, pi.low_stock_threshold, 
-	                 pi.created_at, pi.updated_at, pc.name as category_name
-	          FROM pricelist_items pi
-	          JOIN pricelist_categories pc ON pi.category_id = pc.id
-	          WHERE pi.id = $1`
-	err = db.QueryRow(query, id).Scan(
-		&item.ID, &item.CategoryID, &item.Name, &item.Description, &item.Price, &item.SKU, 
-		&item.IsAvailable, &item.ItemType, &item.CurrentStock, &item.LowStockThreshold, 
-		&item.CreatedAt, &item.UpdatedAt, &categoryName,
-	)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Pricelist item not found"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch pricelist item: " + err.Error()})
+	item, err := h.pricelistService.GetItemByID(itemID)
+	if err != nil {
+		utils.LogError(err, "GetPricelistItemByID: Error from pricelistService.GetItemByID for ID "+idStr)
+		if errors.Is(err, services.ErrItemNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Item not found.", err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch item.", "Internal error"))
+		}
 		return
 	}
-	item.Category = &models.PricelistCategory{ID: item.CategoryID, Name: categoryName}
 	c.JSON(http.StatusOK, item)
 }
 
-// UpdatePricelistItem handles updating an existing pricelist item
-func UpdatePricelistItem(c *gin.Context) {
+// UpdatePricelistItem handles updating a pricelist item.
+func (h *PricelistHandler) UpdatePricelistItem(c *gin.Context) {
 	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	itemID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid item ID"})
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid item ID format.", err.Error()))
 		return
 	}
 
-	var item models.PricelistItem
-	if err := c.ShouldBindJSON(&item); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload: " + err.Error()})
+	var req services.UpdatePricelistItemRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.LogError(err, "UpdatePricelistItem: Failed to bind JSON for ID "+idStr)
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid request payload: "+err.Error(), err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	query := `UPDATE pricelist_items SET 
-	          category_id = $1, name = $2, description = $3, price = $4, sku = $5, 
-	          is_available = $6, item_type = $7, current_stock = $8, low_stock_threshold = $9, updated_at = $10
-	          WHERE id = $11 
-	          RETURNING id, category_id, name, description, price, sku, is_available, item_type, current_stock, low_stock_threshold, created_at, updated_at`
-
-	item.UpdatedAt = time.Now()
-
-	err = db.QueryRow(query, 
-		item.CategoryID, item.Name, item.Description, item.Price, item.SKU, 
-		item.IsAvailable, item.ItemType, item.CurrentStock, item.LowStockThreshold, item.UpdatedAt, id,
-	).Scan(
-		&item.ID, &item.CategoryID, &item.Name, &item.Description, &item.Price, &item.SKU, 
-		&item.IsAvailable, &item.ItemType, &item.CurrentStock, &item.LowStockThreshold, 
-		&item.CreatedAt, &item.UpdatedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Pricelist item not found to update"})
-		return
-	} else if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update pricelist item: " + err.Error()})
+	item, err := h.pricelistService.UpdateItem(itemID, req)
+	if err != nil {
+		utils.LogError(err, "UpdatePricelistItem: Error from pricelistService.UpdateItem for ID "+idStr)
+		if errors.Is(err, services.ErrItemNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Item not found to update.", err.Error()))
+		} else if errors.Is(err, services.ErrItemNameConflict) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Item name or SKU already exists or conflicts.", err.Error()))
+		} else if errors.Is(err, services.ErrCategoryNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeBadRequest, "Invalid category ID provided.", err.Error()))
+		} else if errors.Is(err, services.ErrValidation) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Validation failed: "+err.Error(), err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to update item.", "Internal error"))
+		}
 		return
 	}
-	item.ID = id // Ensure ID from path is used
 	c.JSON(http.StatusOK, item)
 }
 
-// DeletePricelistItem handles deleting a pricelist item
-func DeletePricelistItem(c *gin.Context) {
+// DeletePricelistItem handles deleting a pricelist item.
+func (h *PricelistHandler) DeletePricelistItem(c *gin.Context) {
 	idStr := c.Param("id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+	itemID, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid item ID"})
+		utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid item ID format.", err.Error()))
 		return
 	}
 
-	db := database.GetDB()
-	// Consider checking if item is in active orders or has recent inventory movements before deleting
-	// For now, direct delete:
-	result, err := db.Exec("DELETE FROM pricelist_items WHERE id = $1", id)
+	err = h.pricelistService.DeleteItem(itemID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete pricelist item: " + err.Error()})
-		return
-	}
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Pricelist item not found to delete"})
+		utils.LogError(err, "DeletePricelistItem: Error from pricelistService.DeleteItem for ID "+idStr)
+		if errors.Is(err, services.ErrItemNotFound) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusNotFound, utils.ErrCodeNotFound, "Item not found to delete.", err.Error()))
+		} else if errors.Is(err, services.ErrPricelistForeignKey) {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusConflict, utils.ErrCodeConflict, "Cannot delete item: it is currently in use (e.g., by an order).", err.Error()))
+		} else {
+			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to delete item.", "Internal error"))
+		}
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Pricelist item deleted successfully"})
 }
 
-// TODO: Implement Inventory Movement Handlers (CRUD)
-
+// Remove or comment out old standalone functions if they existed:
+// func CreatePricelistCategory(c *gin.Context) { ... }
+// func GetPricelistCategories(c *gin.Context) { ... }
+// ... and so on for all category and item handlers ...
+// func CreatePricelistItem(c *gin.Context) { ... }
+// func GetPricelistItems(c *gin.Context) { ... }
+// ... etc. ...

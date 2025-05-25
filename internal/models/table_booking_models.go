@@ -33,3 +33,15 @@ type Booking struct {
 	StaffMember    *StaffMember `json:"staff_member,omitempty"` // For joining with StaffMember details
 }
 
+// BookingFilters defines the available filters for querying bookings.
+type BookingFilters struct {
+	ClientID  *int64     `form:"client_id"`
+	TableID   *int64     `form:"table_id"`
+	StaffID   *int64     `form:"staff_id"`
+	DateFrom  *time.Time `form:"date_from"` // Expect YYYY-MM-DD, time part will be ignored or set to start/end of day
+	DateTo    *time.Time `form:"date_to"`   // Expect YYYY-MM-DD
+	Status    *string    `form:"status"`
+	Page      int        `form:"page"`
+	PageSize  int        `form:"page_size"`
+}
+
