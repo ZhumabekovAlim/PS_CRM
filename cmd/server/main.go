@@ -6,11 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"log"
-	"net/http"
-	"os"
-	"strings"
-
 	"ps_club_backend/internal/database"
 	// "ps_club_backend/internal/handlers" // No longer directly used for route setup here
 	// "ps_club_backend/internal/middleware" // No longer directly used for route setup here
@@ -66,7 +61,7 @@ func main() {
 
 	// Setup all application routes
 	dbConn := database.GetDB()
-	router_pkg.Setup(router, dbConn)
+	router.Setup(router, dbConn) // Changed router_pkg to router
 
 	// Server port configuration
 	port := utils.Getenv("PORT", "8080") // Default to 8080 if not set

@@ -61,7 +61,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 
 // GetOrders handles fetching all orders with filters
 func (h *OrderHandler) GetOrders(c *gin.Context) {
-	var filters services.OrderFilters
+	var filters models.OrderFilters // Changed from services.OrderFilters to models.OrderFilters
 
 	// Parse query parameters
 	if clientIDStr := c.Query("client_id"); clientIDStr != "" {
@@ -120,12 +120,14 @@ func (h *OrderHandler) GetOrders(c *gin.Context) {
 		filters.PageSize = 10 // Default page size
 	}
 
-
-	orders, err := h.orderService.GetOrders(filters)
+	// The GetOrders method in OrderService now returns (orders []models.Order, totalCount int, err error)
+	// The handler needs to adapt to this.
+	orders, totalCount, err := h.orderService.GetOrders(filters)
 	if err != nil {
 		utils.LogError(err, "GetOrders: Error from orderService.GetOrders")
 		// Check if it's a specific validation error for date format from service
-		if err.Error() == "invalid date filter format: "+*filters.Date+", expected YYYY-MM-DD" {
+		// This specific error check might need to be more robust if the error message changes
+		if filters.Date != nil && err.Error() == "invalid date filter format: "+*filters.Date+", expected YYYY-MM-DD" {
 			utils.RespondWithError(c, utils.NewAPIError(http.StatusBadRequest, utils.ErrCodeValidationFailed, "Invalid date format. Use YYYY-MM-DD.", err.Error()))
 		} else {
 			utils.RespondWithError(c, utils.NewAPIError(http.StatusInternalServerError, utils.ErrCodeInternalServerError, "Failed to fetch orders.", "Internal error"))
@@ -136,12 +138,15 @@ func (h *OrderHandler) GetOrders(c *gin.Context) {
 	// TODO: The service currently returns []models.Order.
 	// If pagination is added to service to return total count, the response structure here might change.
 	// For now, just returning the slice of orders. A common pattern is to return a struct like:
-	// { "data": orders, "page": filters.Page, "page_size": filters.PageSize, "total_items": totalCount }
 	if orders == nil { // Ensure we return an empty list instead of null if no orders found
-		c.JSON(http.StatusOK, []models.Order{})
-		return
+		orders = []models.Order{}
 	}
-	c.JSON(http.StatusOK, orders)
+	c.JSON(http.StatusOK, gin.H{
+		"data":      orders,
+		"total":     totalCount,
+		"page":      filters.Page,
+		"page_size": filters.PageSize,
+	})
 }
 
 // GetOrderByID handles fetching a single order by ID with its items

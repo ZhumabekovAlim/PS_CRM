@@ -2,6 +2,33 @@ package models
 
 import "time"
 
+// BookingStatus defines the type for booking statuses
+type BookingStatus string
+
+const (
+	BookingStatusConfirmed  BookingStatus = "confirmed"
+	BookingStatusCancelled  BookingStatus = "cancelled"
+	BookingStatusCompleted  BookingStatus = "completed"
+	BookingStatusNoShow     BookingStatus = "no-show"
+	BookingStatusPending    BookingStatus = "pending" // Added as a common initial state
+	// Add other statuses if they are used or anticipated
+)
+
+// IsValidBookingStatus checks if the provided status string is a valid BookingStatus.
+func IsValidBookingStatus(status string) bool {
+	s := BookingStatus(status) // Convert string to BookingStatus type for comparison
+	switch s {
+	case BookingStatusConfirmed,
+		 BookingStatusCancelled,
+		 BookingStatusCompleted,
+		 BookingStatusNoShow,
+		 BookingStatusPending:
+		return true
+	default:
+		return false
+	}
+}
+
 // GameTable represents a physical table or console in the club
 type GameTable struct {
 	ID          int64     `json:"id" db:"id"`
