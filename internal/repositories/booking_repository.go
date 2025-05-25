@@ -94,7 +94,12 @@ func scanBookingRow(row scanner, isList bool) (*models.Booking, int, error) {
 		client.FullName = clientFullName.String
 		if clientPhone.Valid { client.PhoneNumber = &clientPhone.String }
 		if clientEmail.Valid { client.Email = &clientEmail.String }
-		if clientDOB.Valid { client.DateOfBirth = &clientDOB.Time }
+		if clientDOB.Valid {
+			dateStr := clientDOB.Time.Format("2006-01-02")
+			client.DateOfBirth = &dateStr
+		} else {
+			client.DateOfBirth = nil
+		}
 		if clientLoyaltyPoints.Valid { lp := int(clientLoyaltyPoints.Int32); client.LoyaltyPoints = &lp }
 		if clientNotes.Valid { client.Notes = &clientNotes.String }
 		booking.Client = &client

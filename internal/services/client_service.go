@@ -137,11 +137,17 @@ func (s *clientService) CreateClient(req CreateClientRequest) (*models.Client, e
 		}
 	}
 	
+	var dobStringPointer *string
+	if dob != nil {
+		s := dob.Format("2006-01-02")
+		dobStringPointer = &s
+	}
+	
 	client := &models.Client{
 		FullName:      req.FullName,
 		PhoneNumber:   req.PhoneNumber,
 		Email:         req.Email,
-		DateOfBirth:   dob,
+		DateOfBirth:   dobStringPointer, // Updated
 		LoyaltyPoints: &loyaltyPoints,
 		Notes:         req.Notes,
 	}
@@ -216,9 +222,14 @@ func (s *clientService) UpdateClient(clientID int64, req UpdateClientRequest) (*
 	if req.PhoneNumber != nil { client.PhoneNumber = req.PhoneNumber }
 	if req.Email != nil { client.Email = req.Email }
 	if req.DateOfBirth != nil {
-		dob, parseErr := s.parseDateOfBirth(req.DateOfBirth)
+		parsedDob, parseErr := s.parseDateOfBirth(req.DateOfBirth)
 		if parseErr != nil { return nil, parseErr }
-		client.DateOfBirth = dob
+		var dobStrToUpdate *string
+		if parsedDob != nil {
+			s := parsedDob.Format("2006-01-02")
+			dobStrToUpdate = &s
+		}
+		client.DateOfBirth = dobStrToUpdate // Updated
 	}
 	if req.LoyaltyPoints != nil {
 		if *req.LoyaltyPoints < 0 {

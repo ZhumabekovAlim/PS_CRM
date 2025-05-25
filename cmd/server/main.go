@@ -34,10 +34,10 @@ func main() {
 	database.InitDB(dbHost, dbPort, dbUser, dbPassword, dbName, dbSSLMode, dbSchemaPath)
 	utils.LogInfo("Database initialized", map[string]interface{}{"configured_from_env": true})
 
-	router := gin.Default()
+	engine := gin.Default() // Renamed router to engine
 
 	// Add GinLogger middleware for request logging
-	router.Use(utils.GinLogger())
+	engine.Use(utils.GinLogger()) // Updated to engine
 
 	// CORS configuration
 	corsAllowedOriginsEnv := os.Getenv("CORS_ALLOWED_ORIGINS")
@@ -53,22 +53,22 @@ func main() {
 	config.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 	config.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
 	config.AllowCredentials = true
-	router.Use(cors.New(config))
+	engine.Use(cors.New(config)) // Updated to engine
 
-	router.GET("/ping", func(c *gin.Context) {
+	engine.GET("/ping", func(c *gin.Context) { // Updated to engine
 		c.JSON(http.StatusOK, gin.H{"message": "pong"})
 	})
 
 	// Setup all application routes
 	dbConn := database.GetDB()
-	router.Setup(router, dbConn) // Changed router_pkg to router
+	router.Setup(engine, dbConn) // Updated router to engine for the first argument
 
 	// Server port configuration
 	port := utils.Getenv("PORT", "8080") // Default to 8080 if not set
 	utils.LogInfo("Server starting", map[string]interface{}{"port": port, "configured_from_env": true})
 	utils.LogInfo("Frontend should be configured to make API calls", map[string]interface{}{"url": "http://localhost:" + port + "/api/v1"})
 
-	if err := router.Run(":" + port); err != nil {
+	if err := engine.Run(":" + port); err != nil { // Updated to engine
 		utils.LogError(err, "Failed to start server")
 		log.Fatalf("Failed to start server: %v", err)
 	}

@@ -2,11 +2,12 @@ package services
 
 import (
 	"database/sql"
+	"database/sql"
 	"errors"
 	"fmt"
 	"ps_club_backend/internal/models"
-	"ps_club_backend/internal/repositories" // Added
-	// "strconv" // No longer needed here
+	"ps_club_backend/internal/repositories"
+	"ps_club_backend/pkg/utils" // Added for utils.NewNullString
 	"strings"
 	"time"
 )
@@ -166,7 +167,7 @@ func (s *orderService) CreateOrder(req CreateOrderRequest) (*models.Order, error
 				StaffID:         &req.StaffID,
 				MovementType:    MovementTypeSale,
 				QuantityChanged: -itemReq.Quantity,
-				Reason:          models.NewNullString("Order creation"),
+				Reason:          utils.NewNullString("Order creation"), // Changed to utils
 				MovementDate:    time.Now(),
 			}
 			_, repoErr = s.inventoryMvRepo.CreateMovement(tx, &movement)
@@ -179,7 +180,7 @@ func (s *orderService) CreateOrder(req CreateOrderRequest) (*models.Order, error
 			Quantity:        itemReq.Quantity,
 			UnitPrice:       price,
 			TotalPrice:      itemTotalPrice,
-			Notes:           models.NewNullString(itemReq.Notes),
+			Notes:           utils.NewNullString(itemReq.Notes), // Changed to utils
 		})
 	}
 
@@ -316,7 +317,7 @@ func (s *orderService) UpdateOrderStatus(orderID int64, req UpdateOrderStatusReq
 					StaffID:         currentOrder.StaffID, // Use staff ID from the order
 					MovementType:    MovementTypeReturnCancellation,
 					QuantityChanged: item.Quantity, // Positive quantity for return
-					Reason:          models.NewNullString(fmt.Sprintf("Order %d cancelled", orderID)),
+					Reason:          utils.NewNullString(fmt.Sprintf("Order %d cancelled", orderID)), // Changed to utils
 					MovementDate:    time.Now(),
 				}
 				_, repoErr = s.inventoryMvRepo.CreateMovement(tx, &movement)
@@ -376,7 +377,7 @@ func (s *orderService) DeleteOrder(orderID int64) error {
 					StaffID:         order.StaffID, // Use staff ID from the order
 					MovementType:    MovementTypeReturnDeletion,
 					QuantityChanged: item.Quantity, // Positive quantity for return
-					Reason:          models.NewNullString(fmt.Sprintf("Order %d deleted", orderID)),
+					Reason:          utils.NewNullString(fmt.Sprintf("Order %d deleted", orderID)), // Changed to utils
 					MovementDate:    time.Now(),
 				}
 				_, repoErr = s.inventoryMvRepo.CreateMovement(tx, &movement)

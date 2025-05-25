@@ -24,3 +24,9 @@ type SQLExecutor interface {
 	QueryRow(query string, args ...interface{}) *sql.Row
 	Query(query string, args ...interface{}) (*sql.Rows, error)
 }
+
+// scanner is an interface satisfied by *sql.Row and *sql.Rows.
+// This allows for generic scanning helpers.
+type scanner interface {
+	Scan(dest ...interface{}) error
+}
